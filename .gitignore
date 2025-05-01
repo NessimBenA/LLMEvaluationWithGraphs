@@ -1,0 +1,37 @@
+# Environment and config
+.env
+__pycache__/
+*.py[cod]
+*$py.class
+.Python
+env/
+venv/
+ENV/
+.venv
+
+# Output directories
+kg_json_outputs/
+kg_outputs_broad_eval/
+graph_images/
+
+# Log files
+*.csv
+*.log
+
+# Generated files
+*.json
+*.svg
+*.png
+*.jpg
+*.pdf
+
+# OS files
+.DS_Store
+Thumbs.db
+.directory
+
+# IDE files
+.idea/
+.vscode/
+*.swp
+*.swo

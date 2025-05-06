@@ -1,5 +1,7 @@
 # LLM Knowledge Graph Generation Evaluation
 
+Blog post on this benchmark here : https://nessimbena.github.io/blogposts/llm-benchmarking.html
+
 A scientific toolkit for evaluating, analyzing, and comparing the knowledge representation capabilities of different Large Language Models (LLMs) through their ability to generate structured knowledge graphs.
 
 ## Research Goals

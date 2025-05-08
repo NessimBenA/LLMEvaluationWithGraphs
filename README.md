@@ -46,7 +46,7 @@ pip install -r requirements.txt
 ### 1. Generate Knowledge Graphs
 
 ```bash
-python GenerateJsons.py --subjects "Machine Learning" "Quantum Computing" --models "anthropic/claude-3-opus" "openai/gpt-4-turbo" --api-key YOUR_API_KEY --num-retries 3
+python GenerateJsons.py --subjects "Machine Learning" --models "anthropic/claude-3-opus" "openai/gpt-4o-latest" --api-key YOUR_API_KEY --num-retries 3
 ```
 
 Required arguments:

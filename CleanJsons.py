@@ -1,156 +1,174 @@
-import json
-import os
-import re
 import argparse
+import json
+import re
 import sys
+from pathlib import Path
+from typing import Final, Literal, TypedDict
 
-def sanitize_json_content(content: str) -> tuple[str | None, str | None]:
-    """
-    Applies cleaning logic (fences, bracket extraction) and validates JSON.
-    Returns (cleaned_json_string, error_message)
-    """
-    original_content = content
-    processed_content = content.strip()
-    cleaning_step = "original"
+DEFAULT_REPLY_DIR: Final = "kg_json_outputs"
+STANDARDIZED_PREFIX: Final = "standardized_"
+MAX_JSON_DEPTH: Final = 200
+FENCED_BLOCK: Final = re.compile(r"```(?:json)?(.*?)```", re.DOTALL)
+JSON_TOKEN: Final = re.compile(
+    r"[ \t\n\r]*(?:"
+    r'(?P<string>"(?:[^"\\\x00-\x1f]|\\["\\/bfnrt]|\\u[0-9a-fA-F]{4})*")'
+    r"|(?P<number>-?(?:0|[1-9][0-9]{0,4299})(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?)"
+    r"|(?P<literal>true|false|null)"
+    r"|(?P<punct>[{}\[\]:,]))"
+)
 
-    # Step 1: Clean fences
-    if processed_content.startswith("```json") and processed_content.endswith("```"):
-        processed_content = processed_content[7:-3].strip()
-        cleaning_step = "cleaned ```json fences"
-    elif processed_content.startswith("```") and processed_content.endswith("```"):
-        processed_content = processed_content[3:-3].strip()
-        cleaning_step = "cleaned ``` fences"
-
-    if not processed_content:
-        return None, f"Content empty after {cleaning_step}."
-
-    # Step 2: Extract bracket content
-    first_brace = processed_content.find('{')
-    last_brace = processed_content.rfind('}')
-
-    if first_brace != -1 and last_brace != -1 and last_brace > first_brace:
-        potential_json_str = processed_content[first_brace : last_brace + 1]
-        cleaning_step += ", then extracted bracket content" if cleaning_step != "original" else "extracted bracket content"
-    else:
-        # If braces not found after potential fence cleaning, assume it might be invalid
-        # Or maybe it was *just* the JSON without extra text/fences
-        potential_json_str = processed_content
-        if '{' not in potential_json_str and '}' not in potential_json_str:
-             return None, f"No JSON object braces found after {cleaning_step}."
-        # If braces ARE present but not at start/end, json.loads will fail later, which is ok
-
-    # Step 3: Validate by parsing and re-dumping
-    try:
-        if not potential_json_str.strip():
-             return None, f"Extracted content is empty after {cleaning_step}."
-        parsed_data = json.loads(potential_json_str)
-        # Re-dump with indentation for pretty-printing and consistency
-        cleaned_json_string = json.dumps(parsed_data, indent=2)
-        return cleaned_json_string, None # Success
-    except json.JSONDecodeError as e:
-        return None, f"JSONDecodeError after {cleaning_step}: {e}. Preview: {potential_json_str[:100]}..."
-    except Exception as e:
-        return None, f"Unexpected validation error after {cleaning_step}: {e}"
+ParserState = Literal["value", "value_or_close", "key", "key_or_close", "colon", "after", "done"]
 
 
-def process_directory(directory: str, dry_run: bool = False):
-    """Iterates through .json files, sanitizes, and overwrites."""
-    print(f"--- Starting JSON Sanitization {'(Dry Run)' if dry_run else ''} ---")
-    print(f"Target Directory: {directory}")
-
-    cleaned_count = 0
-    error_count = 0
-    skipped_count = 0
-
-    for root, _, files in os.walk(directory):
-        for filename in files:
-            if filename.lower().endswith(".json"):
-                filepath = os.path.join(root, filename)
-                print(f"\nProcessing: {filepath}")
-
-                try:
-                    with open(filepath, 'r', encoding='utf-8') as f:
-                        original_content = f.read()
-
-                    if not original_content.strip():
-                        print("  Skipped: File is empty.")
-                        skipped_count += 1
-                        continue
-
-                    cleaned_json, error = sanitize_json_content(original_content)
-
-                    if error:
-                        print(f"  Error: {error}")
-                        # Optionally log original preview for context
-                        # print(f"    Original Preview: {original_content[:150]}...")
-                        error_count += 1
-                        continue
-
-                    if cleaned_json is None: # Should not happen if error is None, but safety check
-                         print(f"  Error: Sanitization returned None without error message.")
-                         error_count += 1
-                         continue
-
-                    # Check if content actually changed (ignoring whitespace differences from indent)
-                    # Parse original again (best effort) to compare structure, not just string
-                    original_parsed = None
-                    try:
-                        # Try parsing the result of bracket extraction on original for comparison
-                        # This handles cases where original had fences/text but was otherwise identical
-                        _, original_error = sanitize_json_content(original_content)
-                        if not original_error:
-                           temp_cleaned_original, _ = sanitize_json_content(original_content)
-                           if temp_cleaned_original:
-                               original_parsed = json.loads(temp_cleaned_original) # Load the *cleaned* original
-                    except:
-                        pass # Ignore errors parsing original for comparison
-
-                    cleaned_parsed = json.loads(cleaned_json) # We know this works
-
-                    # Only write if structure differs or original wasn't valid/parsable cleanly
-                    needs_write = (original_parsed != cleaned_parsed) or (original_parsed is None)
-
-                    if needs_write:
-                        if not dry_run:
-                            try:
-                                with open(filepath, 'w', encoding='utf-8') as f:
-                                    f.write(cleaned_json)
-                                print(f"  Success: Cleaned and overwrote file.")
-                                cleaned_count += 1
-                            except IOError as e:
-                                print(f"  Error: Failed to write cleaned file: {e}")
-                                error_count += 1
-                        else:
-                            print(f"  Success: File needs cleaning (Dry Run - Not saving).")
-                            cleaned_count += 1 # Count as needing cleaning
-                    else:
-                         print(f"  Skipped: File content already clean.")
-                         skipped_count += 1
+class Node(TypedDict):
+    id: str
+    label: str
 
 
-                except IOError as e:
-                    print(f"  Error: Cannot read file: {e}")
-                    error_count += 1
-                except Exception as e:
-                    print(f"  Error: Unexpected failure processing file: {e}")
-                    error_count += 1
+class Edge(TypedDict):
+    source: str
+    target: str
+    label: str
 
-    print("\n--- Sanitization Summary ---")
-    print(f"Files Processed: {cleaned_count + error_count + skipped_count}")
-    print(f"Files Cleaned/Overwritten: {cleaned_count if not dry_run else 0} ({cleaned_count} needed cleaning)")
-    print(f"Files Skipped (Empty/Already Clean): {skipped_count}")
-    print(f"Files with Errors: {error_count}")
-    print("--- Finished ---")
+
+class StandardGraph(TypedDict):
+    nodes: list[Node]
+    edges: list[Edge]
+
+
+def closed(stack: list[str]) -> ParserState:
+    return "after" if stack else "done"
+
+
+def next_state(state: ParserState, kind: str, token: str, stack: list[str]) -> ParserState | None:
+    if state in ("value", "value_or_close"):
+        if state == "value_or_close" and token == "]":
+            stack.pop()
+            return closed(stack)
+        if kind != "punct":
+            return closed(stack)
+        if token in ("{", "["):
+            stack.append(token)
+            return "key_or_close" if token == "{" else "value_or_close"
+        return None
+    if state in ("key", "key_or_close"):
+        if state == "key_or_close" and token == "}":
+            stack.pop()
+            return closed(stack)
+        return "colon" if kind == "string" else None
+    if state == "colon":
+        return "value" if token == ":" else None
+    if token == ",":
+        return "key" if stack[-1] == "{" else "value"
+    if token == ("}" if stack[-1] == "{" else "]"):
+        stack.pop()
+        return closed(stack)
+    return None
+
+
+def is_valid_json(text: str) -> bool:
+    stack: list[str] = []
+    state: ParserState | None = "value"
+    position = 0
+    while state is not None and state != "done":
+        match = JSON_TOKEN.match(text, position)
+        if match is None or len(stack) > MAX_JSON_DEPTH:
+            return False
+        position = match.end()
+        kind = match.lastgroup or ""
+        state = next_state(state, kind, match.group(kind) if kind else "", stack)
+    return state == "done" and text[position:].strip(" \t\n\r") == ""
+
+
+def extract_json_text(content: str) -> str | None:
+    candidates = [content, *(block.group(1) for block in FENCED_BLOCK.finditer(content))]
+    for candidate in candidates:
+        start = candidate.find("{")
+        end = candidate.rfind("}")
+        if 0 <= start < end and is_valid_json(candidate[start : end + 1]):
+            return candidate[start : end + 1]
+    return None
+
+
+def listed(value: object) -> list[object] | None:
+    if isinstance(value, list):
+        return list(value)
+    if isinstance(value, dict):
+        return list(value.values())
+    return None
+
+
+def standardize_graph(data: object) -> tuple[StandardGraph | None, str]:
+    if not isinstance(data, dict):
+        return None, "the JSON is not an object"
+    node_items = listed(data.get("nodes"))
+    edge_items = listed(data.get("edges"))
+    if node_items is None or edge_items is None:
+        return None, "no 'nodes' or 'edges' list"
+    nodes: list[Node] = []
+    node_ids: set[str] = set()
+    for item in node_items:
+        if not isinstance(item, dict) or "id" not in item or "label" not in item:
+            continue
+        node_id = str(item["id"]).strip()
+        if node_id and node_id not in node_ids:
+            node_ids.add(node_id)
+            nodes.append({"id": node_id, "label": str(item["label"]).strip()})
+    if not nodes:
+        return None, "no valid nodes"
+    edges: list[Edge] = []
+    pairs: set[tuple[str, str]] = set()
+    for item in edge_items:
+        if not isinstance(item, dict) or not all(key in item for key in ("source", "target", "label")):
+            continue
+        source = str(item["source"]).strip()
+        target = str(item["target"]).strip()
+        if source != target and source in node_ids and target in node_ids and (source, target) not in pairs:
+            pairs.add((source, target))
+            edges.append({"source": source, "target": target, "label": str(item["label"]).strip()})
+    return {"nodes": nodes, "edges": edges}, ""
+
+
+def standardize_reply(content: str) -> tuple[StandardGraph | None, str]:
+    text = extract_json_text(content)
+    if text is None:
+        return None, "no valid JSON object found"
+    return standardize_graph(json.loads(text))
+
+
+def clean_directory(directory: Path, dry_run: bool) -> None:
+    replies = sorted(path for path in directory.glob("*.json") if not path.name.startswith(STANDARDIZED_PREFIX))
+    written = 0
+    failed = 0
+    for path in replies:
+        target = path.with_name(STANDARDIZED_PREFIX + path.name)
+        graph, reason = standardize_reply(path.read_text(encoding="utf-8", errors="replace"))
+        if graph is None:
+            failed += 1
+            stale = target.exists()
+            if stale and not dry_run:
+                target.unlink()
+            print(f"Failed  {path.name}: {reason}" + (f" (removed old {target.name})" if stale else ""))
+            continue
+        if not dry_run:
+            target.write_text(json.dumps(graph, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+        written += 1
+        print(f"{'Would write' if dry_run else 'Wrote'}  {target.name}: {len(graph['nodes'])} nodes, {len(graph['edges'])} edges")
+    print(f"\n{len(replies)} replies, {written} standardized{' (dry run, nothing written)' if dry_run else ''}, {failed} failed.")
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        description="Turn each raw model reply into a standardized graph file, standardized_<name>.json, in the same folder."
+    )
+    parser.add_argument("directory", nargs="?", default=DEFAULT_REPLY_DIR, help=f"Folder of raw replies (default: {DEFAULT_REPLY_DIR}).")
+    parser.add_argument("--dry-run", action="store_true", help="Report what would be written without writing anything.")
+    args = parser.parse_args()
+    directory = Path(str(args.directory))
+    if not directory.is_dir():
+        sys.exit(f"Folder not found: {directory}")
+    clean_directory(directory, bool(args.dry_run))
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Sanitize JSON files in an output directory.")
-    parser.add_argument("directory", help="Path to the directory containing JSON files.")
-    parser.add_argument("--dry-run", action="store_true", help="Perform a dry run without modifying files.")
-    args = parser.parse_args()
-
-    if not os.path.isdir(args.directory):
-        print(f"Error: Directory not found: {args.directory}", file=sys.stderr)
-        sys.exit(1)
-
-    process_directory(args.directory, args.dry_run)
+    main()

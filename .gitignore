@@ -8,11 +8,13 @@ env/
 venv/
 ENV/
 .venv
+.mypy_cache/
 
 # Output directories
 kg_json_outputs/
 kg_outputs_broad_eval/
 graph_images/
+benchmark_results/
 
 # Log files
 *.csv

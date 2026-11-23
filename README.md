@@ -35,7 +35,7 @@ Step 1 needs an OpenRouter API key. Copy `.env.example` to `.env` and put your k
 python GenerateJsons.py --subjects "Physical Sciences" "Life Sciences" --models openai/gpt-4.1 anthropic/claude-3.7-sonnet --num-retries 5
 ```
 
-The run behind the blog post used five subjects and seven models, with five attempts each:
+The April 2025 run that made the graphs shown in the blog post used these five subjects and seven models, with five attempts each:
 
 ```bash
 python GenerateJsons.py \

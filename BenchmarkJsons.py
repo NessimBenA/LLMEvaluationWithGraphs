@@ -1,299 +1,299 @@
-import pandas as pd
-import matplotlib.pyplot as plt
-import seaborn as sns
-import networkx as nx
-import json
-import os
-import re # For filename sanitization (reuse from main script)
-import sys
-import matplotlib.colors as mcolors
+import argparse
+import csv
 import math
-# --- Configuration ---
-CSV_FILE = "broad_eval_results.csv"
-JSON_DIR = "kg_outputs_broad_eval"
-NUM_TOP_GRAPHS = 3
+import statistics
+import sys
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Final
 
-# --- Helper Function (reuse from main script) ---
-def sanitize_filename(name: str) -> str:
-    """Removes or replaces characters unsafe for filenames."""
-    name = re.sub(r'[\\/*?:"<>|]', "", name)
-    name = name.replace(" ", "_")
-    name = name.replace("/", "-")
-    name = name.replace("&", "and") # Handle '&' specifically
-    return name
+import networkx as nx
+from matplotlib.axes import Axes
+from matplotlib.colors import LinearSegmentedColormap
+from matplotlib.figure import Figure
 
-# --- Function to Load and Prepare Data ---
-def load_and_prepare_data(csv_path):
-    """Loads CSV, converts types, and filters for successful runs."""
-    try:
-        df = pd.read_csv(csv_path)
-    except FileNotFoundError:
-        print(f"Error: CSV file not found at {csv_path}", file=sys.stderr)
-        sys.exit(1)
-    except Exception as e:
-        print(f"Error reading CSV file: {e}", file=sys.stderr)
-        sys.exit(1)
+from CleanJsons import DEFAULT_REPLY_DIR, STANDARDIZED_PREFIX, StandardGraph, standardize_reply
+from GenerateJsons import DEFAULT_LOG_FILE, reply_path
 
-    # Convert metric columns to numeric, coercing errors to NaN
-    metric_cols = ['avg_num_nodes', 'avg_num_edges', 'avg_average_degree']
-    for col in metric_cols:
-        df[col] = pd.to_numeric(df[col], errors='coerce')
-
-    # Convert retry counts to integers
-    retry_cols = ['num_retries_attempted', 'num_retries_successful']
-    for col in retry_cols:
-         df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0).astype(int)
+DEFAULT_RESULTS_DIR: Final = "benchmark_results"
+SURFACE: Final = "#fcfcfb"
+INK: Final = "#0b0b0b"
+INK_SECONDARY: Final = "#52514e"
+GRID: Final = "#e1e0d9"
+AXIS: Final = "#c3c2b7"
+BAR: Final = "#2a78d6"
+NO_GRAPH: Final = "#f0efec"
+SEQUENTIAL: Final = ("#cde2fb", "#9ec5f4", "#6da7ec", "#3987e5", "#256abf", "#184f95", "#0d366b")
+LOG_COLUMNS: Final = ("subject", "model", "num_retries_attempted")
 
 
-    # Filter for successful runs for ranking/plotting metrics
-    df_success = df[df['status'] == 'SUCCESS'].copy()
-    df_success.dropna(subset=metric_cols, inplace=True) # Drop rows where metrics couldn't be parsed
-
-    print(f"Loaded {len(df)} records, {len(df_success)} successful runs.")
-    return df, df_success # Return both original and success-filtered
-
-# --- Plotting Functions ---
-
-def plot_ranking_per_concept(df_success):
-    """Plots average degree for each model, grouped by concept."""
-    if df_success.empty:
-        print("No successful runs to plot ranking per concept.")
-        return
-
-    plt.figure(figsize=(15, 8))
-    sns.barplot(data=df_success, x='subject', y='avg_average_degree', hue='model', palette='cubehelix')
-
-    plt.title('Model Ranking by Average Node Degree per Concept')
-    plt.xlabel('Concept (Subject)')
-    plt.ylabel('Average Node Degree (Avg. over Retries)')
-    plt.xticks(rotation=15, ha='right') # Rotate labels slightly
-    plt.legend(title='Model', bbox_to_anchor=(1.05, 1), loc='upper left')
-    plt.tight_layout(rect=[0, 0, 0.85, 1]) # Adjust layout to make space for legend
-    plt.savefig('trial1.jpg')
-
-def plot_overall_ranking(df_success):
-    """Plots overall average degree per model across all concepts."""
-    if df_success.empty:
-        print("No successful runs to plot overall ranking.")
-        return
-
-    # Calculate overall average degree per model
-    overall_avg = df_success.groupby('model')['avg_average_degree'].mean().sort_values(ascending=False)
-
-    plt.figure(figsize=(12, 6))
-    sns.barplot(x=overall_avg.index, y=overall_avg.values, palette='magma')
-
-    plt.title('Overall Model Ranking by Average Node Degree (Across All Concepts)')
-    plt.xlabel('Model')
-    plt.ylabel('Overall Average Node Degree')
-    plt.xticks(rotation=45, ha='right')
-    plt.tight_layout()
-    plt.savefig('trial2.jpg')
-
-# --- Graph Loading and Plotting Functions ---
-
-def create_graph_from_json(json_data: dict) -> nx.DiGraph | None:
-    """Creates a NetworkX graph from the parsed JSON data (list/dict tolerant)."""
-    # --- Get Node Items (Tolerate List or Dict) ---
-    node_items = []
-    if isinstance(json_data.get("nodes"), list):
-        node_items = json_data["nodes"]
-    elif isinstance(json_data.get("nodes"), dict):
-        node_items = list(json_data["nodes"].values())
-    else:
-        print("Error: 'nodes' key is not a list or object/dict in JSON.", file=sys.stderr)
-        return None
-
-    # --- Get Edge Items (Tolerate List or Dict) ---
-    edge_items = []
-    if isinstance(json_data.get("edges"), list):
-        edge_items = json_data["edges"]
-    elif isinstance(json_data.get("edges"), dict):
-        edge_items = list(json_data["edges"].values())
-    else:
-        print("Error: 'edges' key is not a list or object/dict in JSON.", file=sys.stderr)
-        return None
-
-    # --- Graph Construction ---
-    G = nx.DiGraph()
-    node_ids = set()
-    nodes_added, edges_added = 0, 0
-
-    # Add nodes
-    for i, node_data in enumerate(node_items):
-        if not isinstance(node_data, dict) or "id" not in node_data or "label" not in node_data: continue
-        node_id = str(node_data["id"]).strip(); node_label = str(node_data["label"]).strip()
-        if not node_id or node_id in node_ids: continue
-        G.add_node(node_id, label=node_label); node_ids.add(node_id); nodes_added += 1
-
-    # Add edges
-    for i, edge_data in enumerate(edge_items):
-        if not isinstance(edge_data, dict) or "source" not in edge_data or "target" not in edge_data or "label" not in edge_data: continue
-        source_id = str(edge_data["source"]).strip(); target_id = str(edge_data["target"]).strip(); edge_label = str(edge_data["label"]).strip()
-        if not source_id or not target_id or source_id == target_id: continue
-        # Only add edge if both nodes exist (important for visualization)
-        if source_id in node_ids and target_id in node_ids:
-            G.add_edge(source_id, target_id, label=edge_label); edges_added += 1
-        else:
-             print(f"  Skipping edge pointing to/from missing node: {source_id} -> {target_id}", file=sys.stderr)
+@dataclass(frozen=True)
+class Metric:
+    key: str
+    label: str
+    weight: float
+    higher_is_better: bool
 
 
-    print(f"  Graph created for plotting: {nodes_added} nodes, {edges_added} edges.")
-    return G
+METRICS: Final = (
+    Metric("average_degree", "Average Node Degree", 2.0, True),
+    Metric("num_nodes", "Node Count", 1.0, True),
+    Metric("num_edges", "Edge Count", 1.0, True),
+    Metric("density", "Graph Density", 0.8, True),
+    Metric("num_components", "Connected Components", 1.0, False),
+    Metric("largest_component_ratio", "Largest Component Ratio", 0.8, True),
+)
+TOTAL_WEIGHT: Final = sum(metric.weight for metric in METRICS)
 
-def plot_knowledge_graph(G: nx.DiGraph, title: str):
-    """Plots a NetworkX graph attractively."""
-    if not G or G.number_of_nodes() == 0:
-        print(f"Skipping empty graph plot for: {title}")
-        return
 
-    num_nodes = G.number_of_nodes()
-    print(f"  Attempting to plot graph with {num_nodes} nodes and {G.number_of_edges()} edges...")
+@dataclass(frozen=True)
+class Run:
+    subject: str
+    model: str
+    attempts: int
 
-    # Adjust figure size based on number of nodes (heuristic)
-    figsize_base = 15
-    figsize_factor = max(1, num_nodes / 50) # Increase size for larger graphs
-    figsize = (int(figsize_base * figsize_factor), int(figsize_base * figsize_factor))
-    # Cap the size to prevent excessively large figures
-    max_fig_dim = 30
-    figsize = (min(figsize[0], max_fig_dim), min(figsize[1], max_fig_dim))
 
-    plt.figure(figsize=figsize)
-    try:
-        # Kamada-Kawai is often good for structure visualization
-        print("  Calculating Kamada-Kawai layout...")
-        pos = nx.kamada_kawai_layout(G)
-        print("  Layout calculation finished.")
-    except Exception as e_kk:
-        print(f"  Kamada-Kawai layout failed ({e_kk}), trying spring layout...", file=sys.stderr)
-        try:
-            # Spring layout as fallback, needs more iterations for large graphs
-            iterations = min(100, 50 + num_nodes // 2) # Heuristic for iterations
-            print(f"  Calculating spring layout ({iterations} iterations)...")
-            pos = nx.spring_layout(G, k=0.8/math.sqrt(num_nodes) if num_nodes > 0 else 0.8, # Adjust k based on node count
-                                   iterations=iterations, seed=42)
-            print("  Layout calculation finished.")
-        except Exception as e_spring:
-            print(f"  Spring layout also failed ({e_spring}), falling back to random layout.", file=sys.stderr)
-            pos = nx.random_layout(G, seed=42)
+@dataclass(frozen=True)
+class GraphResult:
+    run: Run
+    retry: int
+    path: Path
+    metrics: dict[str, float]
 
-    # Node styling
-    node_size = max(30, 1500 / num_nodes) if num_nodes > 0 else 50 # Smaller nodes for larger graphs
-    node_color = "lightblue"
 
-    # Edge styling
-    edge_color = "grey"
-    edge_width = 0.6
-    arrow_size = max(5, int(node_size / 4)) # Scale arrow size roughly with node size
+@dataclass(frozen=True)
+class SubjectResult:
+    run: Run
+    graphs: int
+    metrics: dict[str, float] | None
+    score: float | None
 
-    # Label styling
-    font_size = max(5, 10 - num_nodes // 20) # Smaller font for larger graphs
 
-    # Get node labels
-    labels = nx.get_node_attributes(G, 'label')
+@dataclass(frozen=True)
+class ModelResult:
+    rank: int
+    model: str
+    score: float
+    subjects_scored: int
+    subjects_without_graph: int
 
-    # Draw the graph elements
-    print("  Drawing graph elements...")
-    nx.draw_networkx_nodes(G, pos, node_size=node_size, node_color=node_color, alpha=0.9)
 
-    # Draw edges with slight curve
-    nx.draw_networkx_edges(
-        G, pos,
-        alpha=0.4,
-        edge_color=edge_color,
-        width=edge_width,
-        arrows=True,
-        arrowstyle='-|>', # Simple arrow head
-        arrowsize=arrow_size,
-        connectionstyle='arc3,rad=0.05' # Slight curve
+def graph_metrics(graph: StandardGraph) -> dict[str, float]:
+    digraph: nx.DiGraph[str] = nx.DiGraph()
+    digraph.add_nodes_from(node["id"] for node in graph["nodes"])
+    digraph.add_edges_from((edge["source"], edge["target"]) for edge in graph["edges"])
+    nodes = digraph.number_of_nodes()
+    edges = digraph.number_of_edges()
+    components = [len(component) for component in nx.weakly_connected_components(digraph)]
+    return {
+        "average_degree": 2 * edges / nodes,
+        "num_nodes": float(nodes),
+        "num_edges": float(edges),
+        "density": float(nx.density(digraph)),
+        "num_components": float(len(components)),
+        "largest_component_ratio": max(components) / nodes,
+    }
+
+
+def latest_runs(log_path: Path) -> list[Run]:
+    runs: dict[tuple[str, str], Run] = {}
+    with log_path.open(newline="", encoding="utf-8") as handle:
+        reader = csv.DictReader(handle)
+        missing = [column for column in LOG_COLUMNS if column not in (reader.fieldnames or [])]
+        if missing:
+            sys.exit(f"{log_path} has no column {', '.join(missing)}; it is not a GenerateJsons.py log.")
+        for row in reader:
+            attempts = str(row["num_retries_attempted"]).strip()
+            run = Run(str(row["subject"]), str(row["model"]), int(attempts) if attempts.isdigit() else 0)
+            runs[(run.subject, run.model)] = run
+    return list(runs.values())
+
+
+def load_graphs(runs: list[Run], reply_dir: Path) -> list[GraphResult]:
+    results: list[GraphResult] = []
+    for run in runs:
+        for retry in range(1, run.attempts + 1):
+            raw = reply_path(reply_dir, run.subject, run.model, retry)
+            path = raw.with_name(STANDARDIZED_PREFIX + raw.name)
+            if not path.is_file():
+                continue
+            graph, reason = standardize_reply(path.read_text(encoding="utf-8"))
+            if graph is None:
+                print(f"Skipped {path.name}: {reason}")
+                continue
+            results.append(GraphResult(run, retry, path, graph_metrics(graph)))
+    return results
+
+
+def normalized(value: float, low: float, high: float, higher_is_better: bool) -> float:
+    if high == low:
+        return 1.0
+    scaled = (value - low) / (high - low)
+    return scaled if higher_is_better else 1.0 - scaled
+
+
+def composite_scores(averaged: dict[Run, dict[str, float]]) -> dict[Run, float]:
+    scores: dict[Run, float] = {}
+    for subject in sorted({run.subject for run in averaged}):
+        group = {run: metrics for run, metrics in averaged.items() if run.subject == subject}
+        for run, metrics in group.items():
+            weighted = 0.0
+            for metric in METRICS:
+                values = [other[metric.key] for other in group.values()]
+                weighted += metric.weight * normalized(metrics[metric.key], min(values), max(values), metric.higher_is_better)
+            scores[run] = weighted / TOTAL_WEIGHT
+    return scores
+
+
+def subject_results(runs: list[Run], graphs: list[GraphResult]) -> list[SubjectResult]:
+    averaged: dict[Run, dict[str, float]] = {}
+    counts: dict[Run, int] = {}
+    for run in runs:
+        own = [graph.metrics for graph in graphs if graph.run == run]
+        counts[run] = len(own)
+        if own:
+            averaged[run] = {metric.key: statistics.mean(values[metric.key] for values in own) for metric in METRICS}
+    scores = composite_scores(averaged)
+    ordered = sorted(runs, key=lambda run: (run.subject, run.model))
+    return [SubjectResult(run, counts[run], averaged.get(run), scores.get(run)) for run in ordered]
+
+
+def model_ranking(results: list[SubjectResult]) -> list[ModelResult]:
+    rows: list[tuple[float, str, int, int]] = []
+    for model in sorted({result.run.model for result in results}):
+        own = [result for result in results if result.run.model == model]
+        scores = [result.score for result in own if result.score is not None]
+        if scores:
+            rows.append((statistics.mean(scores), model, len(scores), len(own) - len(scores)))
+    rows.sort(key=lambda row: (-row[0], row[1]))
+    return [ModelResult(rank, model, score, scored, missing) for rank, (score, model, scored, missing) in enumerate(rows, start=1)]
+
+
+def number(value: float | None) -> str:
+    return "" if value is None else f"{value:.4f}"
+
+
+def write_csv(path: Path, header: list[str], rows: list[list[str]]) -> None:
+    with path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(header)
+        writer.writerows(rows)
+
+
+def write_tables(output_dir: Path, graphs: list[GraphResult], results: list[SubjectResult], ranking: list[ModelResult]) -> None:
+    keys = [metric.key for metric in METRICS]
+    write_csv(
+        output_dir / "graph_metrics.csv",
+        ["subject", "model", "retry", "file", *keys],
+        [[graph.run.subject, graph.run.model, str(graph.retry), graph.path.name, *(number(graph.metrics[key]) for key in keys)] for graph in graphs],
+    )
+    write_csv(
+        output_dir / "subject_scores.csv",
+        ["subject", "model", "attempts", "graphs", *keys, "composite_score"],
+        [
+            [
+                result.run.subject,
+                result.run.model,
+                str(result.run.attempts),
+                str(result.graphs),
+                *(number(None if result.metrics is None else result.metrics[key]) for key in keys),
+                number(result.score),
+            ]
+            for result in results
+        ],
+    )
+    write_csv(
+        output_dir / "model_ranking.csv",
+        ["rank", "model", "score", "subjects_scored", "subjects_without_graph"],
+        [[str(row.rank), row.model, number(row.score), str(row.subjects_scored), str(row.subjects_without_graph)] for row in ranking],
     )
 
-    nx.draw_networkx_labels(G, pos, labels=labels, font_size=font_size, font_color='#333333')
 
-    plt.title(title, fontsize=max(10, font_size + 6)) # Adjust title size relative to labels
-    plt.axis('off')
-    plt.tight_layout() # Adjust layout to prevent overlap
-    print("  Displaying plot...")
-    plt.show()
-    print("  Plot displayed.")
+def style(axes: Axes) -> None:
+    axes.set_facecolor(SURFACE)
+    for side in ("top", "right"):
+        axes.spines[side].set_visible(False)
+    for side in ("left", "bottom"):
+        axes.spines[side].set_color(AXIS)
+        axes.spines[side].set_linewidth(0.8)
+    axes.tick_params(colors=INK_SECONDARY, labelsize=9, length=0)
 
 
-# --- Main Execution ---
+def plot_ranking(ranking: list[ModelResult], path: Path) -> None:
+    figure = Figure(figsize=(9, 1.6 + 0.45 * len(ranking)), facecolor=SURFACE)
+    axes = figure.add_subplot()
+    style(axes)
+    bars = axes.barh([row.model for row in ranking], [row.score for row in ranking], height=0.55, color=BAR, zorder=2)
+    axes.bar_label(bars, labels=[f"{row.score:.3f}" for row in ranking], padding=4, color=INK_SECONDARY, fontsize=9)
+    axes.invert_yaxis()
+    axes.set_xlim(0, 1.1)
+    axes.grid(axis="x", color=GRID, linewidth=0.6, zorder=0)
+    axes.tick_params(axis="y", colors=INK, labelsize=10)
+    axes.set_xlabel("Mean composite score over subjects (0 to 1, higher is better)", color=INK_SECONDARY, fontsize=9)
+    axes.set_title("Model ranking by composite graph score", color=INK, fontsize=12, loc="left", pad=12)
+    figure.tight_layout()
+    figure.savefig(path, dpi=200)
+
+
+def plot_subject_scores(results: list[SubjectResult], ranking: list[ModelResult], path: Path) -> None:
+    subjects = sorted({result.run.subject for result in results})
+    ranked = [row.model for row in ranking]
+    models = ranked + sorted({result.run.model for result in results} - set(ranked))
+    scores = {(result.run.model, result.run.subject): result.score for result in results}
+    cells = [[scores.get((model, subject)) for subject in subjects] for model in models]
+    figure = Figure(figsize=(3 + 1.5 * len(subjects), 1.8 + 0.5 * len(models)), facecolor=SURFACE)
+    axes = figure.add_subplot()
+    style(axes)
+    colormap = LinearSegmentedColormap.from_list("composite", list(SEQUENTIAL)).with_extremes(bad=NO_GRAPH)
+    image = axes.imshow([[math.nan if cell is None else cell for cell in row] for row in cells], cmap=colormap, vmin=0.0, vmax=1.0, aspect="auto")
+    for row_index, row in enumerate(cells):
+        for column_index, cell in enumerate(row):
+            text = "no graph" if cell is None else f"{cell:.2f}"
+            color = "#ffffff" if cell is not None and cell >= 0.55 else INK
+            axes.text(column_index, row_index, text, ha="center", va="center", color=color, fontsize=9)
+    axes.set_xticks(range(len(subjects)), subjects, rotation=20, ha="right")
+    axes.set_yticks(range(len(models)), models)
+    axes.tick_params(axis="y", colors=INK, labelsize=9)
+    for spine in axes.spines.values():
+        spine.set_visible(False)
+    colorbar = figure.colorbar(image, ax=axes, fraction=0.04, pad=0.02)
+    colorbar.outline.set_visible(False)
+    colorbar.ax.tick_params(colors=INK_SECONDARY, labelsize=8, length=0)
+    colorbar.set_label("Composite score", color=INK_SECONDARY, fontsize=9)
+    axes.set_title("Composite score per subject (models compared within each subject)", color=INK, fontsize=12, loc="left", pad=12)
+    figure.tight_layout()
+    figure.savefig(path, dpi=200)
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Score every standardized graph on six metrics and rank the models by the weighted composite score.")
+    parser.add_argument("--log", default=DEFAULT_LOG_FILE, help=f"GenerateJsons.py log (default: {DEFAULT_LOG_FILE}).")
+    parser.add_argument("--json-dir", default=DEFAULT_REPLY_DIR, help=f"Folder with the standardized_*.json files (default: {DEFAULT_REPLY_DIR}).")
+    parser.add_argument("--output-dir", default=DEFAULT_RESULTS_DIR, help=f"Folder for the CSV tables and charts (default: {DEFAULT_RESULTS_DIR}).")
+    args = parser.parse_args()
+    log_path = Path(str(args.log))
+    reply_dir = Path(str(args.json_dir))
+    output_dir = Path(str(args.output_dir))
+    if not log_path.is_file():
+        sys.exit(f"Log not found: {log_path}. Run GenerateJsons.py first.")
+    if not reply_dir.is_dir():
+        sys.exit(f"Folder not found: {reply_dir}. Run GenerateJsons.py and CleanJsons.py first.")
+    runs = latest_runs(log_path)
+    graphs = load_graphs(runs, reply_dir)
+    if not graphs:
+        sys.exit(f"No standardized graph in {reply_dir} matches the runs in {log_path}. Run CleanJsons.py first.")
+    results = subject_results(runs, graphs)
+    ranking = model_ranking(results)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    write_tables(output_dir, graphs, results, ranking)
+    plot_ranking(ranking, output_dir / "model_ranking.png")
+    plot_subject_scores(results, ranking, output_dir / "subject_scores.png")
+    print(f"{len(runs)} subject and model runs in the log, {len(graphs)} graphs scored.\n")
+    print(f"{'Rank':<6}{'Score':<9}{'Subjects':<10}Model")
+    for row in ranking:
+        print(f"{row.rank:<6}{row.score:<9.4f}{f'{row.subjects_scored}/{row.subjects_scored + row.subjects_without_graph}':<10}{row.model}")
+    print(f"\nTables and charts written to {output_dir}")
+
+
 if __name__ == "__main__":
-    df_all, df_success = load_and_prepare_data(CSV_FILE)
-
-    # 1. Plot Ranking per Concept
-    print("\n--- Plotting Ranking per Concept ---")
-    plot_ranking_per_concept(df_success)
-
-    # 2. Plot Overall Ranking
-    print("\n--- Plotting Overall Ranking ---")
-    plot_overall_ranking(df_success)
-
-    # 3. Find Top N Graphs and Plot Them
-    print(f"\n--- Finding and Plotting Top {NUM_TOP_GRAPHS} Graphs by Average Degree ---")
-    if df_success.empty:
-        print("No successful runs to find top graphs.")
-    else:
-        top_graphs_info = df_success.sort_values('avg_average_degree', ascending=False).head(NUM_TOP_GRAPHS)
-
-        if len(top_graphs_info) < NUM_TOP_GRAPHS:
-             print(f"Warning: Found only {len(top_graphs_info)} successful runs, plotting those.")
-
-        for index, row in top_graphs_info.iterrows():
-            subject = row['subject']
-            model = row['model']
-            avg_degree = row['avg_average_degree']
-            print(f"\nPlotting graph for: {subject} - {model} (Avg. Degree: {avg_degree:.4f})")
-
-            # Construct expected filename (assuming retry 1 is representative)
-            # You might want more sophisticated logic if retry 1 failed but others succeeded
-            retry_num_to_load = 1 # Simplification: Load retry 1 JSON
-            sanitized_subject = sanitize_filename(subject)
-            sanitized_model = sanitize_filename(model)
-            json_filename = f"{sanitized_subject}_{sanitized_model}_retry_{retry_num_to_load}.json"
-            json_filepath = os.path.join(JSON_DIR, json_filename)
-
-            if not os.path.exists(json_filepath):
-                print(f"  Error: JSON file not found: {json_filepath}", file=sys.stderr)
-                # Try finding *any* successful retry JSON for this combo? (More complex)
-                continue
-
-            try:
-                with open(json_filepath, 'r', encoding='utf-8') as f_json:
-                    # Use robust loading with potential cleaning (though less likely needed now)
-                    content = f_json.read()
-                    processed_content = content.strip()
-                    if processed_content.startswith("```json") and processed_content.endswith("```"):
-                        processed_content = processed_content[7:-3].strip()
-                    elif processed_content.startswith("```") and processed_content.endswith("```"):
-                        processed_content = processed_content[3:-3].strip()
-
-                    first_brace = processed_content.find('{')
-                    last_brace = processed_content.rfind('}')
-                    if first_brace != -1 and last_brace != -1 and last_brace > first_brace:
-                         potential_json_str = processed_content[first_brace : last_brace + 1]
-                    else:
-                         potential_json_str = processed_content # Fallback
-
-                    if not potential_json_str.strip():
-                         raise ValueError("JSON content is empty after cleaning/extraction")
-
-                    json_data = json.loads(potential_json_str)
-
-                # Create graph from loaded JSON data
-                graph = create_graph_from_json(json_data)
-
-                # Plot the graph
-                if graph:
-                    plot_title = f"Knowledge Graph: {subject}\nModel: {model}\n(Avg Degree: {avg_degree:.4f})"
-                    plot_knowledge_graph(graph, plot_title)
-                else:
-                    print(f"  Failed to create graph object from JSON: {json_filepath}")
-
-            except json.JSONDecodeError as e:
-                print(f"  Error decoding JSON file {json_filepath}: {e}", file=sys.stderr)
-            except Exception as e:
-                print(f"  An error occurred processing {json_filepath}: {e}", file=sys.stderr)
-
-    print("\n--- Analysis Complete ---")
+    main()
